@@ -10,13 +10,12 @@ import tqdm
 import os
 import sys
 import time
+import json
 
 from dataset_tennis import TennisDataset
 from model import STM
 
 torch.set_grad_enabled(False) # Volatile
-
-video_id = 13
 
 ##############################################################################
 # Main function
@@ -101,27 +100,30 @@ model.eval() # turn-off BN
 cp = torch.load("STM_weights.pth")
 model.load_state_dict(cp)
 
+
+video_id = 16
+video_table = json.load(open('/home/haotian/Projects/racket2game/db/video_table.json', 'r'))
+video = video_table[video_id]
+
 ##############################################################################
-# Run model on each video
+# Run model on video
 ##############################################################################
+
 for side in ['B']:
-    dataset = TennisDataset(os.path.join("datasets", '{:03}_{}'.format(video_id, side)))
-    for fg in [False, True]:
-        dataset.infer_mask_fg = fg
+    video_path = video['path']
+    point_bounds = [b for pid, b in enumerate(video['point_bounds']) if (side == 'A') ^ (pid not in video['points_foreground'])]
+
+    for infer_mask_fg in [False, True]:
+        dataset = TennisDataset(os.path.join("datasets", '{:03}_{}'.format(video_id, side)), video_path, point_bounds, infer_mask_fg)
         while True:
             next_point = dataset.get_next_point()
             if next_point == -1:
                 break
             if next_point == 0:
                 continue
-            MFs, Ms, num_objects, info = next_point
+            MFs, Ms, num_objects, num_frames = next_point
 
-            num_frames = info['num_frames']
-            point_id = info['point_id']
-
-            print("Running {}th point".format(point_id))
-
-            output_dir = os.path.join('./results',  '{:03}_{}'.format(video_id, 'fg' if fg else 'bg'))
+            output_dir = os.path.join('./results',  '{:03}_{}'.format(video_id, 'fg' if infer_mask_fg else 'bg'))
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
 
