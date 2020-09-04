@@ -16,25 +16,24 @@ from model import STM
 
 torch.set_grad_enabled(False) # Volatile
 
-video_id = 15
+video_id = 13
 
 ##############################################################################
 # Main function
 ##############################################################################
 
-def run_video(Fs, MFs, Ms, num_objects):
+def run_video(dataset, MFs, Ms, num_objects, num_frames, output_dir):
 
     window = 5
 
-    num_frames = Fs.shape[1]
     num_masks = Ms.shape[1]
 
     # Save first mask frame
-    result_shape = [1] + list(Fs.shape)
-    result_shape[1] = Ms.shape[0]
-    result_shape = torch.Size(result_shape)
-    Es = torch.zeros(result_shape) # 1 x K x N X H X W 
-    print(result_shape)
+    # result_shape = [1] + list(Fs.shape)
+    # result_shape[1] = Ms.shape[0]
+    # result_shape = torch.Size(result_shape)
+    # Es = torch.zeros(result_shape) # 1 x K x N X H X W 
+    # print(result_shape)
 
     # Fs = torch.from_numpy(Fs).unsqueeze(0).cuda()
     MFs = torch.from_numpy(MFs).unsqueeze(0).cuda()
@@ -52,17 +51,18 @@ def run_video(Fs, MFs, Ms, num_objects):
             mem_key = torch.cat([mem_key, curr_key], dim=3) # 1 x K x C x N x H x W 
             mem_val = torch.cat([mem_val, curr_val], dim=3)
 
-    pred = []
     for t in tqdm.tqdm(range(num_frames)):
+
+        frame_input, frame_output_id = dataset.get_next_frame()
 
         # segment from memory
         with torch.no_grad():
-            frame = torch.from_numpy(Fs[:,t]).unsqueeze(0).cuda()
-            logit = model(frame, mem_key, mem_val, torch.tensor([num_objects]))
-        Es[:,:,t] = F.softmax(logit, dim=1)
+            frame_input = torch.from_numpy(frame_input).unsqueeze(0).cuda() # 1 x 3 x H x W
+            logit = model(frame_input, mem_key, mem_val, torch.tensor([num_objects]))
+            output = F.softmax(logit, dim=1)
 
         with torch.no_grad():
-            curr_key, curr_val = model(frame, Es[:,:,t], torch.tensor([1]))
+            curr_key, curr_val = model(frame_input, output, torch.tensor([1]))
 
         mem_key = torch.cat([mem_key, curr_key], dim=3)
         mem_val = torch.cat([mem_val, curr_val], dim=3)
@@ -76,16 +76,19 @@ def run_video(Fs, MFs, Ms, num_objects):
             mem_key = torch.cat([first_key, tail_keys], dim=3)
             mem_val = torch.cat([first_val, tail_vals], dim=3)
 
-        del frame
+        mask = torch.argmax(output[0], dim=0).cpu().numpy().astype(np.uint8)
+        # Fill back cropped region
+        if dataset.infer_mask_fg:
+            mask = np.concatenate((dataset.mask_filling_fg, mask), axis=0)
+        else:
+            mask = np.concatenate((mask, dataset.mask_filling_bg), axis=0)
+
+        mask_pil = Image.fromarray(255 * mask)
+        mask_pil.save(os.path.join(output_dir, '{:08d}.png'.format(frame_output_id)))
+
+        del frame_input
+        del output
         torch.cuda.empty_cache()
-        # pred = np.argmax(Es[0].cpu().numpy(), axis=0).astype(np.uint8)
-        # pred.append(torch.argmax(Es[0, :, t], dim=0).cpu().numpy().astype(np.uint8))
-
-    print("Running argmax over outputs ...")
-    # # pred = np.argmax(Es[0].cpu().numpy(), axis=0).astype(np.uint8)
-    pred = torch.argmax(Es[0], dim=0).cpu().numpy().astype(np.uint8)
-    return pred
-
 
 ##############################################################################
 # Setup model
@@ -101,9 +104,9 @@ model.load_state_dict(cp)
 ##############################################################################
 # Run model on each video
 ##############################################################################
-for side in ['A', 'B']:
+for side in ['B']:
     dataset = TennisDataset(os.path.join("datasets", '{:03}_{}'.format(video_id, side)))
-    for fg in [True, False]:
+    for fg in [False, True]:
         dataset.infer_mask_fg = fg
         while True:
             next_point = dataset.get_next_point()
@@ -111,23 +114,18 @@ for side in ['A', 'B']:
                 break
             if next_point == 0:
                 continue
-            Fs, MFs, Ms, num_objects, info = next_point
+            MFs, Ms, num_objects, info = next_point
 
             num_frames = info['num_frames']
             point_id = info['point_id']
 
             print("Running {}th point".format(point_id))
 
-            # Run model
-            pred = run_video(Fs, MFs, Ms, num_objects)
-                
-            # Save results
-            test_path = os.path.join('./results',  '{:03}_{}'.format(video_id, 'fg' if fg else 'bg'))
-            print("Dumping results for {}th point".format(point_id))
-            if not os.path.exists(test_path):
-                os.makedirs(test_path)
-            for i in range(num_frames):
-                img_E = Image.fromarray(255 * pred[i])
-                img_E.save(os.path.join(test_path, '{:08d}.png'.format(info['frame_ids'][i])))
+            output_dir = os.path.join('./results',  '{:03}_{}'.format(video_id, 'fg' if fg else 'bg'))
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
 
-            del Fs, MFs, Ms, pred
+            # Run model
+            run_video(dataset, MFs, Ms, num_objects, num_frames, output_dir)
+
+            del MFs, Ms
